@@ -160,5 +160,5 @@ cython_debug/
 #.idea/
 
 # datasets
-dataset
+datasets/
 log_dir/

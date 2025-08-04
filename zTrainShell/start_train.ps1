@@ -20,7 +20,7 @@
 Write-Output "Current directory: $(Get-Location)"
 
 # Start the Python script and get the process object
-$process = Start-Process -WindowStyle Hidden -FilePath "python" -ArgumentList "train_network.py" -RedirectStandardOutput "zTrainShell\train_total_ablation_no_lsrm.log" -RedirectStandardError "zTrainShell\train_process_ts-fl_ablation_no_lsrm.log" -PassThru
+$process = Start-Process -WindowStyle Hidden -FilePath "python" -ArgumentList "train.py" -RedirectStandardOutput "zTrainShell\train_total.log" -RedirectStandardError "zTrainShell\train_process_ts1.log" -PassThru
 
 # Get the process ID
 $processId = $process.Id

@@ -21,7 +21,7 @@ def parseArg():
         "--datapath",
         help="Dataset path.",
         required=False,
-        default="./dataset/*/images/*.jpg",
+        default="./datasets/*/images/*.jpg",
     )
     parser.add_argument(
         "-log",
@@ -215,7 +215,7 @@ def train(args):
                 fixed_tps=False,
                 mode=args.mode,
                 probabilistic_tps=True,
-                ensemble_strategy="mean",  # 兼容模式
+                ensemble_strategy="sample",  # 兼容模式
             )
             .to(dev)
             .train()

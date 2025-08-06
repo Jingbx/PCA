@@ -20,6 +20,7 @@ import torchvision.transforms as transforms
 
 from modules.tps import pytorch as TPS
 from modules.models.attn.EMA import EMA
+from modules.models.attn.PLA import PolaLinearAttention as PLA
 
 # from modules import utils
 
@@ -1001,7 +1002,7 @@ class ProbabilisticThinPlateNet(nn.Module):
         # 原始网络组件
         self.ctrlpts = (8, 8)
         self.nctrl = self.ctrlpts[0] * self.ctrlpts[1]
-        self.nparam = self.nctrl + 3
+        self.nparam = self.nctrl + 2
         self.interpolator = InterpolateSparse2d(mode="bilinear")
 
         # 特征提取网络 (保持原始结构)

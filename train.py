@@ -139,13 +139,13 @@ def train(args):
 
     if args.mode == "end2end-backbone" or args.mode == "ts1":
         batch_size = 12
-        steps = 80_000 if not args.dry_run else 10
+        steps = 100_000 if not args.dry_run else 1000
         lr = 1e-3
 
     else:
         # reduce batch size due to memory constraints
         batch_size = 6
-        steps = 95_001 if not args.dry_run else 1000
+        steps = 120_001 if not args.dry_run else 1000
         lr = 2e-4
 
     if args.mode == "end2end-backbone":
@@ -200,26 +200,26 @@ def train(args):
             param.requires_grad = False
 
     else:
-        # net = (
-        #     DEAL(
-        #         enc_channels=[1, 32, 64, backbone_nfeats],
-        #         fixed_tps=False,
-        #         mode=args.mode,
-        #     )
-        #     .to(dev)
-        #     .train()
-        # )
         net = (
-            ProbabilisticDEAL(
+            DEAL(
                 enc_channels=[1, 32, 64, backbone_nfeats],
                 fixed_tps=False,
                 mode=args.mode,
-                probabilistic_tps=True,
-                ensemble_strategy="sample",  # 兼容模式
             )
             .to(dev)
             .train()
         )
+        # net = (
+        #     ProbabilisticDEAL(
+        #         enc_channels=[1, 32, 64, backbone_nfeats],
+        #         fixed_tps=False,
+        #         mode=args.mode,
+        #         probabilistic_tps=True,
+        #         ensemble_strategy="sample",  # 兼容模式
+        #     )
+        #     .to(dev)
+        #     .train()
+        # )
 
     # print(net)
     get_nb_trainable_params(net)

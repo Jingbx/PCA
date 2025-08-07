@@ -71,22 +71,23 @@ class DALF_extractor:
                 mode = m
 
         if mode is None:
-            raise RuntimeError("Could not parse network mode from file name - it has to be present")
+            raise RuntimeError(
+                "Could not parse network mode from file name - it has to be present"
+            )
 
-        # self.net = DEAL(
-        #     enc_channels=[1, 32, 64, backbone_nfeats],
-        #     fixed_tps=fixed_tps,
-        #     mode=mode,
-        # ).to(dev)
-        #
-
-        self.net =  ProbabilisticDEAL(
+        self.net = DEAL(
             enc_channels=[1, 32, 64, backbone_nfeats],
             fixed_tps=fixed_tps,
             mode=mode,
-            probabilistic_tps=True,
-            ensemble_strategy="mean",  # 兼容模式
         ).to(dev)
+
+        # self.net =  ProbabilisticDEAL(
+        #     enc_channels=[1, 32, 64, backbone_nfeats],
+        #     fixed_tps=fixed_tps,
+        #     mode=mode,
+        #     probabilistic_tps=True,
+        #     ensemble_strategy="mean",  # 兼容模式
+        # ).to(dev)
 
         self.net.load_state_dict(torch.load(model, map_location=dev), strict=True)
 
@@ -215,11 +216,17 @@ class DALF_extractor:
             perscale_kpts = top_k // len(scales)
             all_kpts = np.vstack([kpts[:perscale_kpts] for kpts in kpts_list[:-1]])
             all_descs = np.vstack([descs[:perscale_kpts] for descs in descs_list[:-1]])
-            all_scores = np.hstack([scores[:perscale_kpts] for scores in scores_list[:-1]])
+            all_scores = np.hstack(
+                [scores[:perscale_kpts] for scores in scores_list[:-1]]
+            )
 
             all_kpts = np.vstack([all_kpts, kpts_list[-1][: (top_k - len(all_kpts))]])
-            all_descs = np.vstack([all_descs, descs_list[-1][: (top_k - len(all_descs))]])
-            all_scores = np.hstack([all_scores, scores_list[-1][: (top_k - len(all_scores))]])
+            all_descs = np.vstack(
+                [all_descs, descs_list[-1][: (top_k - len(all_descs))]]
+            )
+            all_scores = np.hstack(
+                [all_scores, scores_list[-1][: (top_k - len(all_scores))]]
+            )
         else:
             all_kpts = kpts_list[0]
             all_descs = descs_list[0]
@@ -255,7 +262,10 @@ class InterpolateSparse2d(nn.Module):
         self.mode = mode
 
     def normgrid(self, x, H, W):
-        return 2.0 * (x / (torch.tensor([W - 1, H - 1], device=x.device, dtype=x.dtype))) - 1.0
+        return (
+            2.0 * (x / (torch.tensor([W - 1, H - 1], device=x.device, dtype=x.dtype)))
+            - 1.0
+        )
 
     def forward(self, x, pos, H, W):
         grid = self.normgrid(pos, H, W).unsqueeze(0).unsqueeze(-2)
@@ -387,8 +397,12 @@ class Matcher(nn.Module):
         )
         mutual = choice_rows[choice_cols] == seq
 
-        logprob_rows = torch.gather(logprob_rows, -1, choice_rows.unsqueeze(-1)).squeeze(-1)
-        logprob_cols = torch.gather(logprob_cols, -1, choice_cols.unsqueeze(-1)).squeeze(-1)
+        logprob_rows = torch.gather(
+            logprob_rows, -1, choice_rows.unsqueeze(-1)
+        ).squeeze(-1)
+        logprob_cols = torch.gather(
+            logprob_cols, -1, choice_cols.unsqueeze(-1)
+        ).squeeze(-1)
 
         log_probs = logprob_rows[choice_cols[mutual]] + logprob_cols[seq[mutual]]
 
@@ -438,6 +452,7 @@ class DEAL(nn.Module):
     def __init__(self, enc_channels=[1, 32, 64, 128], fixed_tps=False, mode=None):
         super().__init__()
         self.net = UNet(enc_channels)
+        self.pla = None
         self.detector = KeypointSampler()
         self.interpolator = InterpolateSparse2d()
 
@@ -480,15 +495,21 @@ class DEAL(nn.Module):
         gy, gx = torch.meshgrid(g, g)
         center_grid = torch.cat([gx.unsqueeze(-1), gy.unsqueeze(-1)], -1).to(xy.device)
         grids = center_grid.unsqueeze(0).repeat(xy.shape[0], 1, 1, 1)
-        grids = (grids + xy.view(-1, 1, 1, 2)) / torch.tensor([W - 1, H - 1]).to(xy.device)
+        grids = (grids + xy.view(-1, 1, 1, 2)) / torch.tensor([W - 1, H - 1]).to(
+            xy.device
+        )
         grids = grids * 2 - 1
-        patches_scores = F.grid_sample(score_map, grids, mode="nearest", align_corners=True)
+        patches_scores = F.grid_sample(
+            score_map, grids, mode="nearest", align_corners=True
+        )
 
         # compute 2d expectation over local patches
-        patches_scores = F.softmax(patches_scores.view(-1, size * size) / 1.0, dim=-1).view(
-            -1, 1, size, size
+        patches_scores = F.softmax(
+            patches_scores.view(-1, size * size) / 1.0, dim=-1
+        ).view(-1, 1, size, size)
+        xy_offsets = (
+            dsnt.spatial_expectation2d(patches_scores, False).view(-1, 2) - size // 2
         )
-        xy_offsets = dsnt.spatial_expectation2d(patches_scores, False).view(-1, 2) - size // 2
         # print(xy_offsets[:4])
         xy = xy.float() + xy_offsets
 
@@ -506,12 +527,27 @@ class DEAL(nn.Module):
         return self.interpolator(feature_map, kpts, H, W).contiguous()
 
     def forward(self, x, NMS=False, threshold=3.0, return_tensors=False, top_k=None):
+        # 第一次调用forward时，根据输入x的宽高初始化PLA
+        if self.pla is None:
+            B, C, H, W = x.shape
+            self.pla = PLA(64, hw=[int(H / 8), int(W / 8)])
+            self.pla = self.pla.to(x.device)
 
         if self.nchannels == 1 and x.shape[1] != 1:
             x = torch.mean(x, axis=1, keepdim=True)
 
         B, C, H, W = x.shape
         out = self.net(x)
+
+        B, C_feat, H_feat, W_feat = out["feat"].shape
+        input = (
+            out["feat"].reshape(B, C_feat, -1).transpose(-1, -2)
+        )  # 转换为[B, N, C_feat]，其中N=H_feat*W_feat
+        output = self.pla(input)
+        output = output.view(B, C_feat, H_feat, W_feat)
+        out["feat"] = output
+
+        print(out["feat"].shape)
         # print(out['map'].shape, out['descr'].shape)
         if not NMS:
             kpts = self.detector(out["map"])
@@ -559,13 +595,19 @@ class DEAL(nn.Module):
                 kpts[b]["patches"] = patches[b]
             else:
                 with torch.no_grad():
-                    kpts[b]["patches"] = torch.zeros(len(kpts[b]["xy"]), 1, 32, 32).to(x.device)
+                    kpts[b]["patches"] = torch.zeros(len(kpts[b]["xy"]), 1, 32, 32).to(
+                        x.device
+                    )
 
         if NMS:
             if len(kpts[b]["xy"]) == 1:
                 raise RuntimeError("No keypoints detected.")
 
-            if self.mode == "end2end-full" or self.mode == "ts2" or self.mode == "ts-fl":
+            if (
+                self.mode == "end2end-full"
+                or self.mode == "ts2"
+                or self.mode == "ts-fl"
+            ):
                 # distinct & invariant features : 64 + 64 dims
                 if self.mode == "ts-fl":  # fuse descriptors with a MLP
                     final_desc = torch.cat(
@@ -669,15 +711,21 @@ class ProbabilisticDEAL(nn.Module):
         gy, gx = torch.meshgrid(g, g)
         center_grid = torch.cat([gx.unsqueeze(-1), gy.unsqueeze(-1)], -1).to(xy.device)
         grids = center_grid.unsqueeze(0).repeat(xy.shape[0], 1, 1, 1)
-        grids = (grids + xy.view(-1, 1, 1, 2)) / torch.tensor([W - 1, H - 1]).to(xy.device)
+        grids = (grids + xy.view(-1, 1, 1, 2)) / torch.tensor([W - 1, H - 1]).to(
+            xy.device
+        )
         grids = grids * 2 - 1
-        patches_scores = F.grid_sample(score_map, grids, mode="nearest", align_corners=True)
+        patches_scores = F.grid_sample(
+            score_map, grids, mode="nearest", align_corners=True
+        )
 
         # compute 2d expectation over local patches
-        patches_scores = F.softmax(patches_scores.view(-1, size * size) / 1.0, dim=-1).view(
-            -1, 1, size, size
+        patches_scores = F.softmax(
+            patches_scores.view(-1, size * size) / 1.0, dim=-1
+        ).view(-1, 1, size, size)
+        xy_offsets = (
+            dsnt.spatial_expectation2d(patches_scores, False).view(-1, 2) - size // 2
         )
-        xy_offsets = dsnt.spatial_expectation2d(patches_scores, False).view(-1, 2) - size // 2
         # print(xy_offsets[:4])
         xy = xy.float() + xy_offsets
 
@@ -748,13 +796,19 @@ class ProbabilisticDEAL(nn.Module):
                 kpts[b]["patches"] = patches[b]
             else:
                 with torch.no_grad():
-                    kpts[b]["patches"] = torch.zeros(len(kpts[b]["xy"]), 1, 32, 32).to(x.device)
+                    kpts[b]["patches"] = torch.zeros(len(kpts[b]["xy"]), 1, 32, 32).to(
+                        x.device
+                    )
 
         if NMS:
             if len(kpts[b]["xy"]) == 1:
                 raise RuntimeError("No keypoints detected.")
 
-            if self.mode == "end2end-full" or self.mode == "ts2" or self.mode == "ts-fl":
+            if (
+                self.mode == "end2end-full"
+                or self.mode == "ts2"
+                or self.mode == "ts-fl"
+            ):
                 # distinct & invariant features : 64 + 64 dims
                 if self.mode == "ts-fl":  # fuse descriptors with a MLP
                     final_desc = torch.cat(
@@ -825,7 +879,7 @@ class ThinPlateNet(nn.Module):
             nn.ReLU(),
         )
 
-        # self.ema_attn = EMA(in_channels * 2)
+        self.ema_attn = EMA(in_channels * 2)
 
         self.attn = nn.Sequential(
             nn.Linear(in_channels * 2, in_channels * 4),
@@ -844,7 +898,9 @@ class ThinPlateNet(nn.Module):
             self.attn[i].weight.data.normal_(0.0, 1e-5)
             self.attn[i].bias.data.zero_()  # normal_(0., 1e-5)
 
-    def get_polar_grid(self, keypts, Hs, Ws, coords="linear", gridSize=(32, 32), maxR=32.0):
+    def get_polar_grid(
+        self, keypts, Hs, Ws, coords="linear", gridSize=(32, 32), maxR=32.0
+    ):
         """
         gets polar grids centered at each of 2D keypoint positions
         Input:
@@ -857,14 +913,19 @@ class ThinPlateNet(nn.Module):
         maxR = torch.ones_like(keypts[:, 0]) * maxR
         self.batchSize = keypts.shape[0]
 
-        ident = torch.tensor([[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], device=keypts.device).expand(
-            self.batchSize, -1, -1
-        )
+        ident = torch.tensor(
+            [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], device=keypts.device
+        ).expand(self.batchSize, -1, -1)
         grid = F.affine_grid(ident, (self.batchSize, 1) + gridSize, align_corners=False)
         grid_y = grid[..., 0].view(self.batchSize, -1)
         grid_x = grid[..., 1].view(self.batchSize, -1)
 
-        maxR = torch.unsqueeze(maxR, -1).expand(-1, grid_y.shape[-1]).float().to(keypts.device)
+        maxR = (
+            torch.unsqueeze(maxR, -1)
+            .expand(-1, grid_y.shape[-1])
+            .float()
+            .to(keypts.device)
+        )
 
         # get radius of polar grid with values within [1, maxR]
         normGrid = (grid_y + 1) / 2
@@ -881,8 +942,14 @@ class ThinPlateNet(nn.Module):
         # y is from -1 to 1; theta is from 0 to 2pi
         t_s = (grid_x + 1) * np.pi
 
-        x_coord = torch.unsqueeze(keypts[:, 0], -1).expand(-1, grid_x.shape[-1]) / Ws * 2.0 - 1.0
-        y_coord = torch.unsqueeze(keypts[:, 1], -1).expand(-1, grid_y.shape[-1]) / Hs * 2.0 - 1.0
+        x_coord = (
+            torch.unsqueeze(keypts[:, 0], -1).expand(-1, grid_x.shape[-1]) / Ws * 2.0
+            - 1.0
+        )
+        y_coord = (
+            torch.unsqueeze(keypts[:, 1], -1).expand(-1, grid_y.shape[-1]) / Hs * 2.0
+            - 1.0
+        )
 
         aspectRatio = Ws / Hs
 
@@ -915,7 +982,7 @@ class ThinPlateNet(nn.Module):
         B, C, _, _ = x.shape
 
         Theta = self.fcn(x)  # compute TPS params
-        # Theta = self.ema_attn(Theta)
+        Theta = self.ema_attn(Theta)
 
         for b in range(B):
             if keypts[b]["xy"] is not None and len(keypts[b]["xy"]) >= 16:
@@ -934,7 +1001,11 @@ class ThinPlateNet(nn.Module):
                 grid_img = polargrid.permute(
                     0, 3, 1, 2
                 )  # Trick to allow interpolating a torch 2D meshgrid into desired shape
-                ctrl = F.interpolate(grid_img, self.ctrlpts).permute(0, 2, 3, 1).view(N, -1, 2)
+                ctrl = (
+                    F.interpolate(grid_img, self.ctrlpts)
+                    .permute(0, 2, 3, 1)
+                    .view(N, -1, 2)
+                )
 
                 theta = self.interpolator(
                     Theta[b], keypts[b]["xy"], Ho, Wo
@@ -982,7 +1053,12 @@ class ProbabilisticThinPlateNet(nn.Module):
     """
 
     def __init__(
-        self, in_channels, nchannels=1, fixed_tps=False, probabilistic=True, **prob_kwargs
+        self,
+        in_channels,
+        nchannels=1,
+        fixed_tps=False,
+        probabilistic=True,
+        **prob_kwargs
     ):
         super().__init__()
 
@@ -1014,7 +1090,7 @@ class ProbabilisticThinPlateNet(nn.Module):
             nn.BatchNorm2d(in_channels * 2, affine=False),
             nn.ReLU(),
         )
-        
+
         self.ema_attn = EMA(in_channels * 2)
 
         if self.probabilistic:
@@ -1074,21 +1150,28 @@ class ProbabilisticThinPlateNet(nn.Module):
         self.attn_var[-2].weight.data.zero_()
         self.attn_var[-2].bias.data.fill_(self.var_init)
 
-    def get_polar_grid(self, keypts, Hs, Ws, coords="linear", gridSize=(32, 32), maxR=32.0):
+    def get_polar_grid(
+        self, keypts, Hs, Ws, coords="linear", gridSize=(32, 32), maxR=32.0
+    ):
         """生成极坐标网格 - 完全保持原始实现"""
         maxR = torch.ones_like(keypts[:, 0]) * maxR
         self.batchSize = keypts.shape[0]
 
-        ident = torch.tensor([[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], device=keypts.device).expand(
-            self.batchSize, -1, -1
-        )
+        ident = torch.tensor(
+            [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]], device=keypts.device
+        ).expand(self.batchSize, -1, -1)
 
         grid = F.affine_grid(ident, (self.batchSize, 1) + gridSize, align_corners=False)
 
         grid_y = grid[..., 0].view(self.batchSize, -1)
         grid_x = grid[..., 1].view(self.batchSize, -1)
 
-        maxR = torch.unsqueeze(maxR, -1).expand(-1, grid_y.shape[-1]).float().to(keypts.device)
+        maxR = (
+            torch.unsqueeze(maxR, -1)
+            .expand(-1, grid_y.shape[-1])
+            .float()
+            .to(keypts.device)
+        )
 
         normGrid = (grid_y + 1) / 2
         if coords == "log":
@@ -1101,8 +1184,14 @@ class ProbabilisticThinPlateNet(nn.Module):
         r_s = (r_s_ - 1) / (maxR - 1) * 2 * maxR / Ws
         t_s = (grid_x + 1) * np.pi
 
-        x_coord = torch.unsqueeze(keypts[:, 0], -1).expand(-1, grid_x.shape[-1]) / Ws * 2.0 - 1.0
-        y_coord = torch.unsqueeze(keypts[:, 1], -1).expand(-1, grid_y.shape[-1]) / Hs * 2.0 - 1.0
+        x_coord = (
+            torch.unsqueeze(keypts[:, 0], -1).expand(-1, grid_x.shape[-1]) / Ws * 2.0
+            - 1.0
+        )
+        y_coord = (
+            torch.unsqueeze(keypts[:, 1], -1).expand(-1, grid_y.shape[-1]) / Hs * 2.0
+            - 1.0
+        )
 
         aspectRatio = Ws / Hs
         x_s = r_s * torch.cos(t_s) + x_coord
@@ -1199,7 +1288,11 @@ class ProbabilisticThinPlateNet(nn.Module):
 
                 # 生成控制点
                 grid_img = polargrid.permute(0, 3, 1, 2)
-                ctrl = F.interpolate(grid_img, self.ctrlpts).permute(0, 2, 3, 1).view(N, -1, 2)
+                ctrl = (
+                    F.interpolate(grid_img, self.ctrlpts)
+                    .permute(0, 2, 3, 1)
+                    .view(N, -1, 2)
+                )
 
                 # 特征插值
                 theta_features = self.interpolator(Theta[b], keypts[b]["xy"], Ho, Wo)
@@ -1208,7 +1301,9 @@ class ProbabilisticThinPlateNet(nn.Module):
                     # 确定性模式 - 原始逻辑
                     theta = self.attn(theta_features)
                     theta = theta.view(-1, self.nparam, 2)
-                    curr_patches = self._apply_tps_transform(theta, ctrl, polargrid, in_imgs[b])
+                    curr_patches = self._apply_tps_transform(
+                        theta, ctrl, polargrid, in_imgs[b]
+                    )
 
                 else:
                     # 概率模式
@@ -1218,18 +1313,26 @@ class ProbabilisticThinPlateNet(nn.Module):
                     if self.ensemble_strategy == "mean":
                         # 使用均值 (默认兼容模式)
                         theta = theta_mu.view(-1, self.nparam, 2)
-                        curr_patches = self._apply_tps_transform(theta, ctrl, polargrid, in_imgs[b])
+                        curr_patches = self._apply_tps_transform(
+                            theta, ctrl, polargrid, in_imgs[b]
+                        )
 
                     elif self.ensemble_strategy == "sample":
                         # 单次采样
-                        theta_samples = self._sample_tps_parameters(theta_mu, theta_var, 1)
+                        theta_samples = self._sample_tps_parameters(
+                            theta_mu, theta_var, 1
+                        )
                         theta = theta_samples[0].view(-1, self.nparam, 2)
-                        curr_patches = self._apply_tps_transform(theta, ctrl, polargrid, in_imgs[b])
+                        curr_patches = self._apply_tps_transform(
+                            theta, ctrl, polargrid, in_imgs[b]
+                        )
 
                     elif self.ensemble_strategy == "ensemble":
                         # 多次采样集成
                         S = self.train_samples if self.training else self.test_samples
-                        theta_samples = self._sample_tps_parameters(theta_mu, theta_var, S)
+                        theta_samples = self._sample_tps_parameters(
+                            theta_mu, theta_var, S
+                        )
 
                         ensemble_patches = []
                         for s in range(S):
@@ -1436,7 +1539,10 @@ class Decoder(nn.Module):
         print(enc_ch)
         print(dec_ch)
         self.convs = nn.ModuleList(
-            [UpBlock(enc_ch[i + 1] + dec_ch[i], dec_ch[i + 1]) for i in range(len(dec_ch) - 2)]
+            [
+                UpBlock(enc_ch[i + 1] + dec_ch[i], dec_ch[i + 1])
+                for i in range(len(dec_ch) - 2)
+            ]
         )
         self.conv_heatmap = nn.Sequential(
             nn.Conv2d(dec_ch[-2], dec_ch[-2], 3, padding=1, bias=False),
@@ -1461,7 +1567,9 @@ class Decoder(nn.Module):
             x_next = self.convs[i](x_next)
             # print(x_next.shape)
 
-        x_next = F.interpolate(x_next, size=x[-1].size()[-2:], mode="bicubic", align_corners=True)
+        x_next = F.interpolate(
+            x_next, size=x[-1].size()[-2:], mode="bicubic", align_corners=True
+        )
         # print(x_next.shape)
         # print('-----------')
         return self.conv_heatmap(x_next)

@@ -20,7 +20,8 @@ import torchvision.transforms as transforms
 
 from modules.tps import pytorch as TPS
 from modules.models.attn.EMA import EMA
-from modules.models.attn.PLA import PolaLinearAttention as PLA
+# from modules.models.attn.PLA import PolaLinearAttention as PLA
+from modules.models.attn.LEG import LEG_Module as LEG
 
 # from modules import utils
 
@@ -452,7 +453,8 @@ class DEAL(nn.Module):
     def __init__(self, enc_channels=[1, 32, 64, 128], fixed_tps=False, mode=None):
         super().__init__()
         self.net = UNet(enc_channels)
-        self.pla = None
+        # self.pla = None
+        self.leg = LEG(dim=enc_channels[-1],stage=1)
         self.detector = KeypointSampler()
         self.interpolator = InterpolateSparse2d()
 
@@ -528,10 +530,10 @@ class DEAL(nn.Module):
 
     def forward(self, x, NMS=False, threshold=3.0, return_tensors=False, top_k=None):
         # 第一次调用forward时，根据输入x的宽高初始化PLA
-        if self.pla is None:
-            B, C, H, W = x.shape
-            self.pla = PLA(64, hw=[int(H / 8), int(W / 8)])
-            self.pla = self.pla.to(x.device)
+        # if self.pla is None:
+        #     B, C, H, W = x.shape
+        #     self.pla = PLA(64, hw=[int(H / 8), int(W / 8)])
+        #     self.pla = self.pla.to(x.device)
 
         if self.nchannels == 1 and x.shape[1] != 1:
             x = torch.mean(x, axis=1, keepdim=True)
@@ -539,15 +541,19 @@ class DEAL(nn.Module):
         B, C, H, W = x.shape
         out = self.net(x)
 
-        B, C_feat, H_feat, W_feat = out["feat"].shape
-        input = (
-            out["feat"].reshape(B, C_feat, -1).transpose(-1, -2)
-        )  # 转换为[B, N, C_feat]，其中N=H_feat*W_feat
-        output = self.pla(input)
-        output = output.view(B, C_feat, H_feat, W_feat)
-        out["feat"] = output
+        # PLA
+        # B, C_feat, H_feat, W_feat = out["feat"].shape
+        # input = (
+        #     out["feat"].reshape(B, C_feat, -1).transpose(-1, -2)
+        # )  # 转换为[B, N, C_feat]，其中N=H_feat*W_feat
+        # output = self.pla(input)
+        # output = output.view(B, C_feat, H_feat, W_feat)
+        # out["feat"] = output
+        
+        # LEG
+        out["feat"] = self.leg(out["feat"])
 
-        print(out["feat"].shape)
+        # print(out["feat"].shape)
         # print(out['map'].shape, out['descr'].shape)
         if not NMS:
             kpts = self.detector(out["map"])

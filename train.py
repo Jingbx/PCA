@@ -139,7 +139,7 @@ def train(args):
 
     if args.mode == "end2end-backbone" or args.mode == "ts1":
         batch_size = 12
-        steps = 100_000 if not args.dry_run else 1000
+        steps = 100_000 if not args.dry_run else 200
         lr = 1e-3
 
     else:
